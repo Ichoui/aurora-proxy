@@ -115,6 +115,7 @@ function processRequest(req, res) {
         });
 
         proxyRequest.on('error', function (err) {
+            console.log(err);
 
             if (err.code === "ENOTFOUND") {
                 return writeResponse(res, 502, "Host for " + url.format(remoteURL) + " cannot be found.")
@@ -129,10 +130,9 @@ function processRequest(req, res) {
         var proxyResponseSize = 0;
 
         req.pipe(proxyRequest).on('data', function (data) {
-
             requestSize += data.length;
-
-            if (requestSize >= config.max_request_length) {
+            // Filter on ovation aurara latest to let it pass because lot of values inside (more than 150k / each request)
+            if (requestSize >= config.max_request_length && !req.url.includes('/ovation_aurora_latest')) {
                 proxyRequest.end();
                 return sendTooBigResponse(res);
             }
@@ -144,7 +144,7 @@ function processRequest(req, res) {
 
             proxyResponseSize += data.length;
 
-            if (proxyResponseSize >= config.max_request_length) {
+            if (proxyResponseSize >= config.max_request_length && !req.url.includes('/ovation_aurora_latest')) {
                 proxyRequest.end();
                 return sendTooBigResponse(res);
             }
@@ -162,13 +162,11 @@ if (cluster.isMaster) {
     }
 } else {
     http.createServer(function (req, res) {
-        console.log(req);
 
         // Process AWS health checks
         if (req.url === "/health") {
             return writeResponse(res, 200);
         }
-
         var clientIP = getClientAddress(req);
 
         req.clientIP = clientIP;
