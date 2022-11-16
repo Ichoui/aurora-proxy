@@ -1,16 +1,20 @@
-var http = require('http');
-var https = require('https');
-var config = require("./config");
-var url = require("url");
-var request = require("request");
-var cluster = require('cluster');
-var throttle = require("tokenthrottle")({rate: config.max_requests_per_second});
+const http = require('http');
+const https = require('https');
+const config = require("./config");
+const url = require("url");
+const request = require("request");
+const cluster = require('cluster');
+const throttle = require("tokenthrottle")({rate: config.max_requests_per_second});
+
+const express = require('express')
+const app = express()
+const bodyParser = require('body-parser');
 
 http.globalAgent.maxSockets = Infinity;
 https.globalAgent.maxSockets = Infinity;
 
-var publicAddressFinder = require("public-address");
-var publicIP;
+const publicAddressFinder = require("public-address");
+let publicIP;
 
 // Get our public IP address
 publicAddressFinder(function (err, data) {
@@ -43,11 +47,11 @@ function writeResponse(res, httpCode, body) {
 }
 
 function sendInvalidURLResponse(res) {
-    return writeResponse(res, 404, "url must be in the form of /fetch/{some_url_here}");
+    return writeResponse(res, 404, "Url must be [HOST]/aurora/{url}");
 }
 
 function sendTooBigResponse(res) {
-    return writeResponse(res, 413, "the content in the request or response cannot exceed " + config.max_request_length + " characters.");
+    return writeResponse(res, 413, "Max characters allow in the request / response : " + config.max_request_length);
 }
 
 function getClientAddress(req) {
@@ -56,36 +60,38 @@ function getClientAddress(req) {
 }
 
 function processRequest(req, res) {
+    console.log('ICI');
     addCORSHeaders(req, res);
 
     // Return options pre-flight requests right away
     if (req.method.toUpperCase() === "OPTIONS") {
         return writeResponse(res, 204);
     }
-
-    var result = config.fetch_regex.exec(req.url);
-
-    if (result && result.length == 2 && result[1]) {
-        var remoteURL;
-
+    const result = config.aurora_regex.exec(req.url);
+    if (result && result.length === 2 && result[1]) {
+        let remoteURL;
         try {
-            remoteURL = url.parse(decodeURI(result[1]));
+            if (req.url === '/aurora/ovation') {
+                remoteURL = url.parse(decodeURI('https://services.swpc.noaa.gov/products/geospace/propagated-solar-wind-1-hour.json'));
+            } else {
+                remoteURL = url.parse(decodeURI(result[1]));
+            }
         } catch (e) {
             return sendInvalidURLResponse(res);
         }
         // We don't support relative links
         if (!remoteURL.host) {
-            return writeResponse(res, 404, "relative URLS are not supported");
+            return writeResponse(res, 404, "No relative URL");
         }
 
         // Naughty, naughty— deny requests to blacklisted hosts
         if (config.blacklist_hostname_regex.test(remoteURL.hostname)) {
-            return writeResponse(res, 400, "naughty, naughty...");
+            return writeResponse(res, 400, "Nope !");
         }
 
         // We only support http and https
-        if (remoteURL.protocol != "http:" && remoteURL.protocol !== "https:") {
-            return writeResponse(res, 400, "only http and https are supported");
+        if (remoteURL.protocol !== "http:" && remoteURL.protocol !== "https:") {
+            return writeResponse(res, 400, "Https or Http Protocols only");
         }
 
         if (publicIP) {
@@ -105,8 +111,7 @@ function processRequest(req, res) {
         // Remove origin and referer headers. TODO: This is a bit naughty, we should remove at some point.
         delete req.headers["origin"];
         delete req.headers["referer"];
-
-        var proxyRequest = request({
+        const proxyRequest = request({
             url: remoteURL,
             headers: req.headers,
             method: req.method,
@@ -114,33 +119,32 @@ function processRequest(req, res) {
             strictSSL: false
         });
 
-        proxyRequest.on('error', function (err) {
-            console.log(err);
-
+        proxyRequest.on('error', (err) => {
             if (err.code === "ENOTFOUND") {
                 return writeResponse(res, 502, "Host for " + url.format(remoteURL) + " cannot be found.")
             } else {
-                console.log("Proxy Request Error (" + url.format(remoteURL) + "): " + err.toString());
+                console.error("Proxy Request Error (" + url.format(remoteURL) + "): " + err.toString());
                 return writeResponse(res, 500);
             }
 
         });
 
-        var requestSize = 0;
-        var proxyResponseSize = 0;
-
-        req.pipe(proxyRequest).on('data', function (data) {
+        let requestSize = 0;
+        let proxyResponseSize = 0;
+        req.pipe(proxyRequest).on('data', (data) => {
+            console.log(data);
             requestSize += data.length;
             // Filter on ovation aurara latest to let it pass because lot of values inside (more than 150k / each request)
+
             if (requestSize >= config.max_request_length && !req.url.includes('/ovation_aurora_latest')) {
                 proxyRequest.end();
                 return sendTooBigResponse(res);
             }
-        }).on('error', function (err) {
+        }).on('error', () => {
             writeResponse(res, 500, "Stream Error");
         });
 
-        proxyRequest.pipe(res).on('data', function (data) {
+        proxyRequest.pipe(res).on('data', (data) => {
 
             proxyResponseSize += data.length;
 
@@ -157,19 +161,22 @@ function processRequest(req, res) {
 }
 
 if (cluster.isMaster) {
-    for (var i = 0; i < config.cluster_process_count; i++) {
+    for (let i = 0; i < config.cluster_process_count; i++) {
         cluster.fork();
     }
 } else {
-    http.createServer(function (req, res) {
-
+    // app.use(bodyParser.json());
+    app.use((req, res, next) => {
         // Process AWS health checks
-        if (req.url === "/health") {
+        if (req.url === "/isgood") {
             return writeResponse(res, 200);
         }
-        var clientIP = getClientAddress(req);
 
+        const clientIP = getClientAddress(req);
         req.clientIP = clientIP;
+        // console.log(req);
+        // console.log(res);
+        // console.log(req.body); // thinkin here !
 
         // Log our request
         if (config.enable_logging) {
@@ -177,9 +184,10 @@ if (cluster.isMaster) {
         }
 
         if (config.enable_rate_limiting) {
+            // Normal way with max 15 request/sec
             throttle.rateLimit(clientIP, function (err, limited) {
                 if (limited) {
-                    return writeResponse(res, 429, "enhance your calm");
+                    return writeResponse(res, 429, "Too much request");
                 }
 
                 processRequest(req, res);
@@ -187,7 +195,15 @@ if (cluster.isMaster) {
         } else {
             processRequest(req, res);
         }
+    })
 
-    }).listen(config.port);
-    console.log("URL_HOST_TO_FOUND process started (PID " + process.pid + ")");
+    const hostname = 'localhost';
+    app.listen(config.port, hostname, function () {
+        if (hostname === 'localhost') {
+            console.warn("Server works on http://" + hostname + ":" + config.port);
+        } else {
+            console.warn("Server works on https://" + hostname);
+        }
+        console.warn("URL_HOST_TO_FOUND process started (PID " + process.pid + ")");
+    });
 }

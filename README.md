@@ -19,12 +19,12 @@ Dashboards created with freeboard normally access APIs directly from ajax calls 
 
 ### how?
 
-Just prefix any url with http(s)://URL_HOST_TO_FOUND/fetch/
+Just prefix any url with http(s)://URL_HOST_TO_FOUND/aurora/
 
 For example:
 
 ```
-https://URL_HOST_TO_FOUND/fetch/http://my.api.com/get/stuff
+https://URL_HOST_TO_FOUND/aurora/http://my.api.com/get/stuff
 ```
 
 Any HTTP method, headers and body you send, will be sent to the URL you specify and the response will be sent back to you with the proper CORS headers attached.
@@ -36,3 +36,9 @@ Don't abuse the URL_HOST_TO_FOUND server— it is meant for relatively small API
 ### privacy
 
 URL_HOST_TO_FOUND does log the date, requester's IP address, and URL for each request sent to it. We do not log headers or request bodies. We will not share or sell this data to anyone, period.
+
+
+
+## Firebase
+
+https://firebase.google.com/docs/hosting/functions 
