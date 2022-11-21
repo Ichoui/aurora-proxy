@@ -2,13 +2,12 @@ const http = require('http');
 const https = require('https');
 const config = require("./config");
 const url = require("url");
-const request = require("request");
 const cluster = require('cluster');
 const throttle = require("tokenthrottle")({rate: config.max_requests_per_second});
 
 const express = require('express')
 const app = express()
-const bodyParser = require('body-parser');
+const axios = require('axios');
 
 http.globalAgent.maxSockets = Infinity;
 https.globalAgent.maxSockets = Infinity;
@@ -59,8 +58,22 @@ function getClientAddress(req) {
         || req.connection.remoteAddress;
 }
 
+function urlRouterFactory(urlRequested, res, finalUrl) {
+    try {
+        if (urlRequested === '/aurora/map/ovation') {
+            return url.parse(decodeURI('https://services.swpc.noaa.gov/products/geospace/propagated-solar-wind-1-hour.json'));
+        } else if (urlRequested === '/aurora/kp/current') {
+            return url.parse(decodeURI('https://services.swpc.noaa.gov/json/boulder_k_index_1m.json'));
+        } else {
+            // URL is set in front app and does not need to be  reworked
+            return url.parse(decodeURI(finalUrl));
+        }
+    } catch (e) {
+        return sendInvalidURLResponse(res);
+    }
+}
+
 function processRequest(req, res) {
-    console.log('ICI');
     addCORSHeaders(req, res);
 
     // Return options pre-flight requests right away
@@ -69,16 +82,8 @@ function processRequest(req, res) {
     }
     const result = config.aurora_regex.exec(req.url);
     if (result && result.length === 2 && result[1]) {
-        let remoteURL;
-        try {
-            if (req.url === '/aurora/ovation') {
-                remoteURL = url.parse(decodeURI('https://services.swpc.noaa.gov/products/geospace/propagated-solar-wind-1-hour.json'));
-            } else {
-                remoteURL = url.parse(decodeURI(result[1]));
-            }
-        } catch (e) {
-            return sendInvalidURLResponse(res);
-        }
+        const remoteURL = urlRouterFactory(req.url, res, result[1])
+
         // We don't support relative links
         if (!remoteURL.host) {
             return writeResponse(res, 404, "No relative URL");
@@ -111,52 +116,51 @@ function processRequest(req, res) {
         // Remove origin and referer headers. TODO: This is a bit naughty, we should remove at some point.
         delete req.headers["origin"];
         delete req.headers["referer"];
-        const proxyRequest = request({
-            url: remoteURL,
-            headers: req.headers,
-            method: req.method,
-            timeout: config.proxy_request_timeout_ms,
-            strictSSL: false
-        });
 
-        proxyRequest.on('error', (err) => {
-            if (err.code === "ENOTFOUND") {
-                return writeResponse(res, 502, "Host for " + url.format(remoteURL) + " cannot be found.")
-            } else {
-                console.error("Proxy Request Error (" + url.format(remoteURL) + "): " + err.toString());
-                return writeResponse(res, 500);
+        const getUrl = (u) => (url.format(u));
+        const getData = async (url) => {
+            try {
+                const response = await axios.get(url, {
+                    headers: req.headers, method: req.method, timeout: config.proxy_request_timeout_ms
+                })
+                return response.data
+            } catch (err) {
+                if (err.code === "ENOTFOUND") {
+                    return writeResponse(res, 502, "Host for " + getUrl(remoteURL) + " cannot be found.")
+                } else {
+                    console.error("Proxy Request Error (" + getUrl(remoteURL) + "): " + err.toString());
+                    return writeResponse(res, 500, "Request error");
+                }
             }
+        }
 
-        });
 
-        let requestSize = 0;
-        let proxyResponseSize = 0;
-        req.pipe(proxyRequest).on('data', (data) => {
-            console.log(data);
-            requestSize += data.length;
+        getData(getUrl(remoteURL)).then(data => {
+            let requestSize = 0;
+            requestSize += data?.length;
             // Filter on ovation aurara latest to let it pass because lot of values inside (more than 150k / each request)
-
             if (requestSize >= config.max_request_length && !req.url.includes('/ovation_aurora_latest')) {
-                proxyRequest.end();
+                console.log('ef');
+                res.end();
                 return sendTooBigResponse(res);
             }
-        }).on('error', () => {
-            writeResponse(res, 500, "Stream Error");
-        });
 
-        proxyRequest.pipe(res).on('data', (data) => {
+            res.send(dataTreatment(data, req.url))
+        })
 
-            proxyResponseSize += data.length;
-
-            if (proxyResponseSize >= config.max_request_length && !req.url.includes('/ovation_aurora_latest')) {
-                proxyRequest.end();
-                return sendTooBigResponse(res);
-            }
-        }).on('error', function (err) {
-            writeResponse(res, 500, "Stream Error");
-        });
     } else {
         return sendInvalidURLResponse(res);
+    }
+}
+
+function dataTreatment(data, urlRequested) {
+    if (urlRequested === '/aurora/map/ovation') {
+        console.log(data);
+        return data;
+    } else if (urlRequested === '/aurora/kp/current') {
+        return data[data.length - 1]
+    } else {
+        return data;
     }
 }
 
@@ -168,15 +172,12 @@ if (cluster.isMaster) {
     // app.use(bodyParser.json());
     app.use((req, res, next) => {
         // Process AWS health checks
-        if (req.url === "/isgood") {
+        if (req.url === "/quichaud") {
             return writeResponse(res, 200);
         }
 
         const clientIP = getClientAddress(req);
         req.clientIP = clientIP;
-        // console.log(req);
-        // console.log(res);
-        // console.log(req.body); // thinkin here !
 
         // Log our request
         if (config.enable_logging) {
