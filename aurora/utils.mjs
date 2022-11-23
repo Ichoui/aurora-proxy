@@ -1,4 +1,4 @@
-import {max_request_length} from "./config.mjs";
+import {maxRequestLength} from "./config.mjs";
 
 import publicAddressFinder from "public-address";
 
@@ -30,7 +30,7 @@ export function sendInvalidURLResponse(res) {
 }
 
 export function sendTooBigResponse(res) {
-    return writeResponse(res, 413, "Max characters allow in the request / response : " + max_request_length);
+    return writeResponse(res, 413, "Max characters allowed in the request or response : " + maxRequestLength);
 }
 
 export function getClientAddress(req) {

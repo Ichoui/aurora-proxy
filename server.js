@@ -9,50 +9,51 @@ import axios from "axios";
 import cors from "cors";
 import express from "express";
 import {
-    aurora_regex,
-    blacklist_hostname_regex,
-    cluster_process_count,
-    enable_logging,
-    enable_rate_limiting,
-    max_request_length,
-    max_requests_per_second,
+    auroraRegex,
+    blacklistHostnameRegex,
+    clusterProcessCount,
+    enableLogging,
+    enableRateLimiting,
+    maxRequestLength,
+    maxRequestsPerSecond,
     port,
-    proxy_request_timeout_ms
+    proxyRequestTimeoutSs
 } from "./aurora/config.mjs";
+import bodyParser from "body-parser";
 
-const throttle = tokenthrottle({rate: max_requests_per_second});
+const throttle = tokenthrottle({rate: maxRequestsPerSecond});
 const app = express()
 
 http.globalAgent.maxSockets = Infinity;
 https.globalAgent.maxSockets = Infinity;
 
-
 function processRequest(req, res) {
     // addCORSHeaders(req, res);
-
+    const isAuroraApp = !!req.headers['aurora']
     // Return options pre-flight requests right away
     if (req.method.toUpperCase() === "OPTIONS") {
         return writeResponse(res, 204);
     }
-    const result = aurora_regex.exec(req.url);
-    if (result && result.length === 2 && result[1]) {
+    const result = auroraRegex.exec(req.url);
+
+    // We don't support app which are not Aurora
+    if (result && result.length === 2 && result[1] && isAuroraApp) {
         const remoteURL = remoteUrlFactory(req.url, res, result[1])
+        const isRelativeUrl = !remoteURL.host;
 
         // We don't support relative links
-        if (!remoteURL.host) {
-            return writeResponse(res, 404, "No relative URL");
-        }
+        // if (isRelativeUrl) {
+        //     return writeResponse(res, 404, "No relative URL");
+        // }
+        // We only support http and https and relativeUrl from auroraApp
+        // if (remoteURL.protocol !== "http:" && remoteURL.protocol !== "https:" && (isRelativeUrl && !isAuroraApp)) {
+        //     return writeResponse(res, 400, "Https or Http Protocols only");
+        // }
 
         // Naughty, naughty— deny requests to blacklisted hosts
-        if (blacklist_hostname_regex.test(remoteURL.hostname)) {
+        if (blacklistHostnameRegex.test(remoteURL.hostname)) {
             return writeResponse(res, 400, "Nope !");
         }
-
-        // We only support http and https
-        if (remoteURL.protocol !== "http:" && remoteURL.protocol !== "https:") {
-            return writeResponse(res, 400, "Https or Http Protocols only");
-        }
-
         if (publicIP) {
             // Add an X-Forwarded-For header
             if (req.headers["x-forwarded-for"]) {
@@ -75,7 +76,7 @@ function processRequest(req, res) {
         const getData = async (url) => {
             try {
                 const response = await axios.get(url, {
-                    headers: req.headers, method: req.method, timeout: proxy_request_timeout_ms
+                    headers: req.headers, method: req.method, timeout: proxyRequestTimeoutSs
                 })
                 return response.data
             } catch (err) {
@@ -87,21 +88,23 @@ function processRequest(req, res) {
                 }
             }
         }
-
+        // If relative url (not proxy to a swpc url), we only send back data
+        if (isRelativeUrl) {
+            res.status(200).send(dataTreatment(req.url, null, req.body));
+            return;
+        }
 
         getData(getUrl(remoteURL)).then(data => {
             let requestSize = 0;
             requestSize += data?.length;
             // Filter on ovation aurara latest to let it pass because lot of values inside (more than 150k / each request)
-            if (requestSize >= max_request_length && !req.url.includes('/ovation_aurora_latest')) {
-                console.log('ef');
+            if (requestSize >= maxRequestLength && !req.url.includes('/ovation_aurora_latest')) {
                 res.end();
                 return sendTooBigResponse(res);
             }
 
-            res.send(dataTreatment(data, req.url))
+            res.status(200).send(dataTreatment(req.url, data));
         })
-
     } else {
         return sendInvalidURLResponse(res);
     }
@@ -109,11 +112,13 @@ function processRequest(req, res) {
 
 
 if (cluster.isMaster) {
-    for (let i = 0; i < cluster_process_count; i++) {
+    for (let i = 0; i < clusterProcessCount; i++) {
         cluster.fork();
     }
 } else {
-    app.use(cors(), (req, res, next) => {
+    // Adding middleware usage for express app
+    app.use(bodyParser.urlencoded({extended: true}), bodyParser.json(), cors())
+    app.use((req, res, next) => {
         // Process AWS health checks
         if (req.url === "/quichaud") {
             return writeResponse(res, 200);
@@ -123,11 +128,11 @@ if (cluster.isMaster) {
         req.clientIP = clientIP;
 
         // Log our request
-        if (enable_logging) {
+        if (enableLogging) {
             console.log("%s %s %s", (new Date()).toJSON(), clientIP, req.method, req.url);
         }
 
-        if (enable_rate_limiting) {
+        if (enableRateLimiting) {
             // Normal way with max 15 request/sec
             throttle.rateLimit(clientIP, function (err, limited) {
                 if (limited) {

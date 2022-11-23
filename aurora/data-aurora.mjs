@@ -1,11 +1,15 @@
 import url from "url";
-import {sendInvalidURLResponse} from "./utils.mjs";
-// import {MemoryCache} from 'memory-cache-node';
-//
-// const itemsExpirationCheckIntervalInSecs = 10 * 60;
-// const maxItemCount = 1000000;
-// const memoryCache = new MemoryCache(itemsExpirationCheckIntervalInSecs, maxItemCount);
+import {sendInvalidURLResponse, writeResponse} from "./utils.mjs";
+import NodeCache from "node-cache"
+import {cachedTimeMapOvation} from "./config.mjs";
 
+const cache = new NodeCache({checkperiod: 600});
+
+/**
+ * @param urlRequested url requested from front, without the host part
+ * @param res res value from the request triptych (req, res, next)
+ * @param finalUrl URL set in client side  app and does not need to be  reworked
+ */
 export function remoteUrlFactory(urlRequested, res, finalUrl) {
     try {
         if (urlRequested === '/aurora/map/ovation') {
@@ -17,7 +21,6 @@ export function remoteUrlFactory(urlRequested, res, finalUrl) {
         } else if (urlRequested === '/aurora/instant/solarwind') {
             return url.parse(decodeURI('https://services.swpc.noaa.gov/products/geospace/propagated-solar-wind-1-hour.json'));
         } else {
-            // URL is set in front app and does not need to be  reworked
             return url.parse(decodeURI(finalUrl));
         }
     } catch (e) {
@@ -26,13 +29,21 @@ export function remoteUrlFactory(urlRequested, res, finalUrl) {
 }
 
 
-export function dataTreatment(data, urlRequested) {
+/**
+ * @param urlRequested url requested from front, without the host part
+ * @param data any data from API ; nullable
+ * @param body body from POST method
+ */
+export function dataTreatment(urlRequested, data, body) {
     switch (urlRequested) {
         case '/aurora/map/ovation':
-            // console.log(data);
+            const ovationMapCached = cache.get('ovationMapCache')
+            console.log(ovationMapCached);
+            if (ovationMapCached) {
+                return ovationMapCached
+            }
             const mappedCoords = [];
-            // PERFORMANCE FOREACH A VERIFIER
-            // LONG A RECALCULER ET A PASSER A 180
+            // TOdo PERFORMANCE OPTIMISER FOREACH A VERIFIER
             data['coordinates'].forEach((coords /*[long, lat, aurora]*/) => {
                 let long = coords[0];
                 const lat = coords[1];
@@ -41,17 +52,17 @@ export function dataTreatment(data, urlRequested) {
                     // Longitude 180+ dépasse de la map à droite, cela permet de revenir tout à gauche de la carte
                     long = long - 360;
                 }
-
                 // On prend les valeurs paires seulement, et on leur rajoute +2 pour compenser les "trous" causés par l'impair
-                // On passe ainsi d'environ 7500 à 1900 layers supplémentaire
+                // On passe ainsi d'environ 7500 à 1900 valeurs dans le tableau (indication de taille récupérée)
                 if (lat >= 30 || lat <= -30) {
                     if (nowcastAurora >= 2 && long % 2 === 0 && lat % 2 === 0) {
-                        mappedCoords.push(coords)
+                        // coords avec long soustrait pour couvrir -180 à 180 de longitude
+                        mappedCoords.push([long, lat, nowcastAurora])
                     }
                 }
             })
-            console.log(mappedCoords);
-
+            cache.set("ovationMapCache", mappedCoords, cachedTimeMapOvation)
+            cache.set("ovationFullForNowcast", data['coordinates'], cachedTimeMapOvation)
             return mappedCoords;
         case '/aurora/forecast/solarcycle':
             // PERFORMANCE MAP
@@ -60,6 +71,8 @@ export function dataTreatment(data, urlRequested) {
                 predictedSsn: e['predicted_ssn'],
                 predictedSolarFlux: e['predicted_f10.7']
             }))
+        case '/aurora/instant/nowcast':
+            return {nowcast: getNowcastAurora(body['lng'], body['lat'])}
         case '/aurora/forecast/solarwind':
             // const finalData = []
             // const d = data.map((e, i) => {
@@ -77,3 +90,21 @@ export function dataTreatment(data, urlRequested) {
     }
 }
 
+
+function getNowcastAurora(long, lat) {
+    try {
+        const ovationMapCache = cache.get('ovationFullForNowcast');
+        if (!ovationMapCache) {
+            return null;
+        }
+        /*[long, lat, aurora]*/
+        // Todo OTPIMISER
+        for (let coords of ovationMapCache) {
+            if (coords[0] === Math.round(long) && coords[1] === Math.round(lat)) {
+                return coords[2]
+            }
+        }
+    } catch (e) {
+        writeResponse(e, 404, 'Cache nowcast error')
+    }
+}
