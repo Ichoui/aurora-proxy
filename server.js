@@ -1,88 +1,42 @@
-const http = require('http');
-const https = require('https');
-const config = require("./config");
-const url = require("url");
-const cluster = require('cluster');
-const throttle = require("tokenthrottle")({rate: config.max_requests_per_second});
+import {remoteUrlFactory, dataTreatment} from "./data-aurora.mjs";
+import {addCORSHeaders, getClientAddress, publicIP, sendInvalidURLResponse, sendTooBigResponse, writeResponse} from "./utils.mjs";
+import http from "http";
+import https from "https";
+import url from "url";
+import cluster from "cluster";
+import tokenthrottle from "tokenthrottle";
+import axios from "axios";
+import cors from "cors";
+import express from "express";
+import {
+    port,
+    enable_logging,
+    aurora_regex,
+    proxy_request_timeout_ms,
+    max_request_length,
+    enable_rate_limiting,
+    max_requests_per_second,
+    blacklist_hostname_regex,
+    cluster_process_count
+} from "./config.mjs";
 
-const express = require('express')
+const throttle = tokenthrottle({rate: max_requests_per_second});
 const app = express()
-const axios = require('axios');
 
 http.globalAgent.maxSockets = Infinity;
 https.globalAgent.maxSockets = Infinity;
 
-const publicAddressFinder = require("public-address");
-let publicIP;
-
-// Get our public IP address
-publicAddressFinder(function (err, data) {
-    if (!err && data) {
-        publicIP = data.address;
-    }
-});
-
-function addCORSHeaders(req, res) {
-    if (req.method.toUpperCase() === "OPTIONS") {
-        if (req.headers["access-control-request-headers"]) {
-            res.setHeader("Access-Control-Allow-Headers", req.headers["access-control-request-headers"]);
-        }
-
-        if (req.headers["access-control-request-method"]) {
-            res.setHeader("Access-Control-Allow-Methods", req.headers["access-control-request-method"]);
-        }
-    }
-
-    if (req.headers["origin"]) {
-        res.setHeader("Access-Control-Allow-Origin", req.headers["origin"]);
-    } else {
-        res.setHeader("Access-Control-Allow-Origin", "*");
-    }
-}
-
-function writeResponse(res, httpCode, body) {
-    res.statusCode = httpCode;
-    res.end(body);
-}
-
-function sendInvalidURLResponse(res) {
-    return writeResponse(res, 404, "Url must be [HOST]/aurora/{url}");
-}
-
-function sendTooBigResponse(res) {
-    return writeResponse(res, 413, "Max characters allow in the request / response : " + config.max_request_length);
-}
-
-function getClientAddress(req) {
-    return (req.headers['x-forwarded-for'] || '').split(',')[0]
-        || req.connection.remoteAddress;
-}
-
-function urlRouterFactory(urlRequested, res, finalUrl) {
-    try {
-        if (urlRequested === '/aurora/map/ovation') {
-            return url.parse(decodeURI('https://services.swpc.noaa.gov/products/geospace/propagated-solar-wind-1-hour.json'));
-        } else if (urlRequested === '/aurora/kp/current') {
-            return url.parse(decodeURI('https://services.swpc.noaa.gov/json/boulder_k_index_1m.json'));
-        } else {
-            // URL is set in front app and does not need to be  reworked
-            return url.parse(decodeURI(finalUrl));
-        }
-    } catch (e) {
-        return sendInvalidURLResponse(res);
-    }
-}
 
 function processRequest(req, res) {
-    addCORSHeaders(req, res);
+    // addCORSHeaders(req, res);
 
     // Return options pre-flight requests right away
     if (req.method.toUpperCase() === "OPTIONS") {
         return writeResponse(res, 204);
     }
-    const result = config.aurora_regex.exec(req.url);
+    const result = aurora_regex.exec(req.url);
     if (result && result.length === 2 && result[1]) {
-        const remoteURL = urlRouterFactory(req.url, res, result[1])
+        const remoteURL = remoteUrlFactory(req.url, res, result[1])
 
         // We don't support relative links
         if (!remoteURL.host) {
@@ -90,7 +44,7 @@ function processRequest(req, res) {
         }
 
         // Naughty, naughty— deny requests to blacklisted hosts
-        if (config.blacklist_hostname_regex.test(remoteURL.hostname)) {
+        if (blacklist_hostname_regex.test(remoteURL.hostname)) {
             return writeResponse(res, 400, "Nope !");
         }
 
@@ -121,7 +75,7 @@ function processRequest(req, res) {
         const getData = async (url) => {
             try {
                 const response = await axios.get(url, {
-                    headers: req.headers, method: req.method, timeout: config.proxy_request_timeout_ms
+                    headers: req.headers, method: req.method, timeout: proxy_request_timeout_ms
                 })
                 return response.data
             } catch (err) {
@@ -139,7 +93,7 @@ function processRequest(req, res) {
             let requestSize = 0;
             requestSize += data?.length;
             // Filter on ovation aurara latest to let it pass because lot of values inside (more than 150k / each request)
-            if (requestSize >= config.max_request_length && !req.url.includes('/ovation_aurora_latest')) {
+            if (requestSize >= max_request_length && !req.url.includes('/ovation_aurora_latest')) {
                 console.log('ef');
                 res.end();
                 return sendTooBigResponse(res);
@@ -153,24 +107,13 @@ function processRequest(req, res) {
     }
 }
 
-function dataTreatment(data, urlRequested) {
-    if (urlRequested === '/aurora/map/ovation') {
-        console.log(data);
-        return data;
-    } else if (urlRequested === '/aurora/kp/current') {
-        return data[data.length - 1]
-    } else {
-        return data;
-    }
-}
 
 if (cluster.isMaster) {
-    for (let i = 0; i < config.cluster_process_count; i++) {
+    for (let i = 0; i < cluster_process_count; i++) {
         cluster.fork();
     }
 } else {
-    // app.use(bodyParser.json());
-    app.use((req, res, next) => {
+    app.use(cors(), (req, res, next) => {
         // Process AWS health checks
         if (req.url === "/quichaud") {
             return writeResponse(res, 200);
@@ -180,17 +123,16 @@ if (cluster.isMaster) {
         req.clientIP = clientIP;
 
         // Log our request
-        if (config.enable_logging) {
+        if (enable_logging) {
             console.log("%s %s %s", (new Date()).toJSON(), clientIP, req.method, req.url);
         }
 
-        if (config.enable_rate_limiting) {
+        if (enable_rate_limiting) {
             // Normal way with max 15 request/sec
             throttle.rateLimit(clientIP, function (err, limited) {
                 if (limited) {
                     return writeResponse(res, 429, "Too much request");
                 }
-
                 processRequest(req, res);
             })
         } else {
@@ -199,12 +141,13 @@ if (cluster.isMaster) {
     })
 
     const hostname = 'localhost';
-    app.listen(config.port, hostname, function () {
+    app.listen(port, hostname, function () {
         if (hostname === 'localhost') {
-            console.warn("Server works on http://" + hostname + ":" + config.port);
+            console.warn("Server works on http://" + hostname + ":" + port);
         } else {
             console.warn("Server works on https://" + hostname);
         }
         console.warn("URL_HOST_TO_FOUND process started (PID " + process.pid + ")");
     });
 }
+
