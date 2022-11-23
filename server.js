@@ -1,5 +1,5 @@
-import {remoteUrlFactory, dataTreatment} from "./data-aurora.mjs";
-import {addCORSHeaders, getClientAddress, publicIP, sendInvalidURLResponse, sendTooBigResponse, writeResponse} from "./utils.mjs";
+import {dataTreatment, remoteUrlFactory} from "./aurora/data-aurora.mjs";
+import {getClientAddress, publicIP, sendInvalidURLResponse, sendTooBigResponse, writeResponse} from "./aurora/utils.mjs";
 import http from "http";
 import https from "https";
 import url from "url";
@@ -9,16 +9,16 @@ import axios from "axios";
 import cors from "cors";
 import express from "express";
 import {
-    port,
-    enable_logging,
     aurora_regex,
-    proxy_request_timeout_ms,
-    max_request_length,
-    enable_rate_limiting,
-    max_requests_per_second,
     blacklist_hostname_regex,
-    cluster_process_count
-} from "./config.mjs";
+    cluster_process_count,
+    enable_logging,
+    enable_rate_limiting,
+    max_request_length,
+    max_requests_per_second,
+    port,
+    proxy_request_timeout_ms
+} from "./aurora/config.mjs";
 
 const throttle = tokenthrottle({rate: max_requests_per_second});
 const app = express()

@@ -1,6 +1,6 @@
 import url from "url";
+import {sendInvalidURLResponse} from "./utils.mjs";
 // import {MemoryCache} from 'memory-cache-node';
-// import {sendInvalidURLResponse} from "./utils.mjs";
 //
 // const itemsExpirationCheckIntervalInSecs = 10 * 60;
 // const maxItemCount = 1000000;
